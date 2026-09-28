@@ -1,22 +1,34 @@
 'use client';
 import { useState } from 'react';
 import { useRaidStore } from '../store/useRaidStore';
+import { addSuggestionToGuild, updateSuggestionRow, deleteSuggestionRow } from '../lib/suggestionActions';
+import { useGuild } from '../lib/guildContext';
 
 export default function SuggestionBoard() {
+  const { guildId, myMemberId } = useGuild();
   const suggestions = useRaidStore((s) => s.suggestions);
-  const addSuggestion = useRaidStore((s) => s.addSuggestion);
-  const updateSuggestion = useRaidStore((s) => s.updateSuggestion);
-  const deleteSuggestion = useRaidStore((s) => s.deleteSuggestion);
+  const setSuggestions = useRaidStore((s) => s.setSuggestions);
 
-  const [owner, setOwner] = useState('');
   const [content, setContent] = useState('');
   const [editingId, setEditingId] = useState<string | null>(null);
   const [editContent, setEditContent] = useState('');
 
-  function handleSubmit() {
-    if (!owner.trim() || !content.trim()) return;
-    addSuggestion(owner.trim(), content.trim());
+  async function handleSubmit() {
+    if (!content.trim()) return;
+    const fresh = await addSuggestionToGuild(guildId, myMemberId, content.trim());
+    setSuggestions(fresh);
     setContent('');
+  }
+
+  async function handleUpdate(id: string) {
+    const fresh = await updateSuggestionRow(guildId, id, editContent);
+    setSuggestions(fresh);
+    setEditingId(null);
+  }
+
+  async function handleDelete(id: string) {
+    const fresh = await deleteSuggestionRow(guildId, id);
+    setSuggestions(fresh);
   }
 
   return (
@@ -26,12 +38,6 @@ export default function SuggestionBoard() {
       </h2>
 
       <div className="flex flex-col sm:flex-row gap-2">
-        <input
-          value={owner}
-          onChange={(e) => setOwner(e.target.value)}
-          placeholder="닉네임"
-          className="sm:w-32 bg-[#0b0f19] border border-slate-700 rounded-lg px-3 py-2 text-xs text-slate-200 placeholder-slate-600 focus:outline-none focus:border-amber-500"
-        />
         <input
           value={content}
           onChange={(e) => setContent(e.target.value)}
@@ -68,13 +74,7 @@ export default function SuggestionBoard() {
               <div className="flex gap-2 text-[10px] shrink-0">
                 {editingId === s.id ? (
                   <>
-                    <button
-                      onClick={() => {
-                        updateSuggestion(s.id, editContent);
-                        setEditingId(null);
-                      }}
-                      className="text-emerald-400 hover:text-emerald-300"
-                    >
+                    <button onClick={() => handleUpdate(s.id)} className="text-emerald-400 hover:text-emerald-300">
                       저장
                     </button>
                     <button onClick={() => setEditingId(null)} className="text-slate-500 hover:text-slate-300">
@@ -92,7 +92,7 @@ export default function SuggestionBoard() {
                     >
                       수정
                     </button>
-                    <button onClick={() => deleteSuggestion(s.id)} className="text-rose-400 hover:text-rose-300">
+                    <button onClick={() => handleDelete(s.id)} className="text-rose-400 hover:text-rose-300">
                       삭제
                     </button>
                   </>

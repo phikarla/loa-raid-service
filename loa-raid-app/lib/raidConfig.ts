@@ -1,9 +1,11 @@
 // 사과_V4 legacy-index.html 이식 - 원정대/레이드 관련 상수 & 순수 함수
+import type { CSSProperties } from "react";
 import type { Synergy, Role } from "./types";
 
 export const RAID_ORDER: string[] = [
   "[하드] 벨가르딘",
   "[노말] 벨가르딘",
+  "[나메] 세르카",
   "[하드] 세르카",
   "[3단계] 지평의 성당",
   "[2단계] 지평의 성당",
@@ -14,76 +16,72 @@ export function is8PlayerRaid(raidName: string): boolean {
   return raidName.includes("벨가르딘");
 }
 
-// 원정대 대표 닉네임 <-> 약어 매핑
-export const ALIAS_MAP: Record<string, string> = {
-  유네사: "네사", 네사: "네사",
-  토리이잉: "토리", 토리: "토리",
-  밤구대장: "밤구", 밤구: "밤구",
-  박츄바: "추바", 추바: "추바",
-  달뜬달: "무도", 무도: "무도",
-  도남건랜스: "도남", 도남: "도남",
-  충치가몇개냐뭐: "충치", 충치: "충치",
-  퍄퍗: "퍄퍗",
-  Mccurter: "까따", 까따: "까따",
+// 같은 레이드의 난이도끼리만 묶어서 "이 그룹 내에서는 중복 배치 금지"를 판단하는 용도.
+// (다른 레이드 그룹끼리는 같은 주에 둘 다 참여 가능하므로 겹쳐도 됨)
+export const RAID_FAMILY: Record<string, string> = {
+  "[하드] 벨가르딘": "벨가르딘",
+  "[노말] 벨가르딘": "벨가르딘",
+  "[나메] 세르카": "세르카",
+  "[하드] 세르카": "세르카",
+  "[3단계] 지평의 성당": "지평의 성당",
+  "[2단계] 지평의 성당": "지평의 성당",
+  "[1단계] 지평의 성당": "지평의 성당",
 };
 
-// 오늘의 출근부 9인 고정 멤버(약어 기준)
-export const FIXED_MEMBERS: string[] = ["네사", "토리", "밤구", "추바", "무도", "도남", "충치", "퍄퍗", "까따"];
-
-export const OWNER_COLORS: Record<string, string> = {
-  유네사: "border-l-[8px] border-l-red-500",
-  토리이잉: "border-l-[8px] border-l-[#ffff00]",
-  밤구대장: "border-l-[8px] border-l-purple-400",
-  박츄바: "border-l-[8px] border-l-emerald-400",
-  달뜬달: "border-l-[8px] border-l-pink-500",
-  도남건랜스: "border-l-[8px] border-l-sky-400",
-  충치가몇개냐뭐: "border-l-[8px] border-l-[#8B4513]",
-  퍄퍗: "border-l-[8px] border-l-blue-600",
-  Mccurter: "border-l-[8px] border-l-slate-200",
+// 실제 라이브 앱(script.google.com)의 buildDashboardSummary() 레벨 컷 그대로 이식
+export const RAID_MIN_LEVEL: Record<string, number> = {
+  "[하드] 벨가르딘": 1770,
+  "[노말] 벨가르딘": 1750,
+  "[나메] 세르카": 1770,
+  "[하드] 세르카": 1730,
+  "[3단계] 지평의 성당": 1750,
+  "[2단계] 지평의 성당": 1720,
+  "[1단계] 지평의 성당": 1700,
 };
 
-const ALIAS_TO_OWNER_KEY: Record<string, string> = {
-  네사: "유네사", 토리: "토리이잉", 밤구: "밤구대장", 추바: "박츄바",
-  무도: "달뜬달", 도남: "도남건랜스", 충치: "충치가몇개냐뭐", 퍄퍗: "퍄퍗", 까따: "Mccurter",
+export const RAID_MAX_LEVEL: Record<string, number> = {
+  "[하드] 벨가르딘": 9999,
+  "[노말] 벨가르딘": 1770,
+  "[나메] 세르카": 9999,
+  "[하드] 세르카": 1770,
+  "[3단계] 지평의 성당": 9999,
+  "[2단계] 지평의 성당": 1750,
+  "[1단계] 지평의 성당": 1720,
 };
 
-export function getOwnerBorderClass(owner?: string): string {
-  if (!owner) return "border-l-[8px] border-l-slate-700";
-  if (OWNER_COLORS[owner]) return OWNER_COLORS[owner];
-  const alias = ALIAS_MAP[owner] || owner;
-  const targetKey = ALIAS_TO_OWNER_KEY[alias] || alias;
-  return OWNER_COLORS[targetKey] || "border-l-[8px] border-l-slate-700";
-}
-
-const ATTENDANCE_DOT_COLORS: Record<string, string> = {
-  네사: "#FF0000", 토리: "#ffff00", 밤구: "#c084fc", 추바: "#34d399",
-  무도: "#FF1493", 도남: "#38bdf8", 충치: "#8B4513", 퍄퍗: "#0066ff", 까따: "#FFFFFF",
-};
-
-export function getAttendanceColor(name: string): string {
-  const mapped = ALIAS_MAP[name] || name;
-  return ATTENDANCE_DOT_COLORS[mapped] || "#818cf8";
-}
-
-const BOARDING_OWNER_COLORS: Record<string, string> = {
-  네사: "#ef4444", 토리: "#ffff00", 밤구: "#c084fc", 추바: "#34d399",
-  무도: "#ec4899", 도남: "#38bdf8", 충치: "#b5a642", 퍄퍗: "#2563eb", 까따: "#fb923c",
-};
-
-export function getOwnerColor(owner: string): string {
-  return BOARDING_OWNER_COLORS[ALIAS_MAP[owner] || owner] || "#818cf8";
-}
+// 파티 편성표에서 레이드를 3개 그룹으로 묶어서 보여줄 때 쓰는 섹션 메타데이터
+export const RAID_SECTIONS: { title: string; icon: string; borderClass: string; raids: string[] }[] = [
+  {
+    title: "벨가르딘 (하드 / 노말)",
+    icon: "fa-solid fa-skull-crossbones",
+    borderClass: "border-rose-500",
+    raids: ["[하드] 벨가르딘", "[노말] 벨가르딘"],
+  },
+  {
+    title: "지평의 성당 (3 / 2 / 1단계)",
+    icon: "fa-solid fa-church",
+    borderClass: "border-indigo-500",
+    raids: ["[3단계] 지평의 성당", "[2단계] 지평의 성당", "[1단계] 지평의 성당"],
+  },
+  {
+    title: "세르카 (나메 / 하드)",
+    icon: "fa-solid fa-dragon",
+    borderClass: "border-amber-500",
+    raids: ["[나메] 세르카", "[하드] 세르카"],
+  },
+];
 
 // 서포터 직업 목록
 export const SUPPORT_CLASSES = ["바드", "도화가", "홀리나이트", "발키리"];
 
 // 직업 + 역할 -> 시너지 그룹 산출 (Code.gs getSynergy 포팅)
 const SYNERGY_GROUPS: Record<Exclude<Synergy, "서폿" | "일반">, string[]> = {
-  피증: ["소울이터", "브레이커", "소서리스", "데모닉", "슬레이어", "인파이터", "버서커", "가디언나이트"],
-  방깍: ["서머너", "블래스터", "디스트로이어", "리퍼", "블레이드", "워로드", "환수사", "차원술사"],
+  피증: ["소울이터", "브레이커", "소서리스", "데모닉", "슬레이어", "인파이터", "버서커", "가디언나이트", "블레이드", "호크아이"],
+  방감: ["서머너", "블래스터", "디스트로이어", "리퍼", "워로드", "환수사", "차원술사"],
   치피증: ["창술사", "발키리"],
-  치적: ["배틀마스터", "아르카나", "스트라이커", "기상술사"],
+  치적: ["배틀마스터", "아르카나", "스트라이커", "데빌헌터", "건슬링어"],
   공증: ["스카우터", "기공사"],
+  치저감: ["기상술사"],
 };
 
 export function getSynergy(job: string, role: Role | string): Synergy {
@@ -97,10 +95,11 @@ export function getSynergy(job: string, role: Role | string): Synergy {
 export const SYNERGY_STYLES: Record<Synergy, string> = {
   서폿: "bg-pink-500/10 text-pink-400 border border-pink-500/20",
   피증: "bg-rose-500/10 text-rose-400 border border-rose-500/20",
-  방깍: "bg-blue-500/10 text-blue-400 border border-blue-500/20",
+  방감: "bg-blue-500/10 text-blue-400 border border-blue-500/20",
   치피증: "bg-violet-500/10 text-violet-400 border border-violet-500/20",
   치적: "bg-amber-500/10 text-amber-400 border border-amber-500/20",
   공증: "bg-emerald-500/10 text-emerald-400 border border-emerald-500/20",
+  치저감: "bg-red-500/10 text-red-400 border border-red-500/20",
   일반: "bg-slate-500/10 text-slate-400 border border-slate-500/20",
 };
 
@@ -122,4 +121,25 @@ export function getPartyNumber(name: string): number {
 export function sanitizeScore(score: unknown): number {
   const n = parseFloat(String(score));
   return Number.isFinite(n) ? n : 0;
+}
+
+// 길드원 개인별 고정 색상이 없을 때, id 기반으로 안정적인 hex 색상을 생성
+export function hashColor(seed: string): string {
+  let hash = 0;
+  for (let i = 0; i < seed.length; i++) hash = seed.charCodeAt(i) + ((hash << 5) - hash);
+  const hue = Math.abs(hash) % 360;
+  const h = hue / 360, s = 0.7, l = 0.6;
+  const a = s * Math.min(l, 1 - l);
+  const f = (n: number) => {
+    const k = (n + h * 12) % 12;
+    const c = l - a * Math.max(Math.min(k - 3, 9 - k, 1), -1);
+    return Math.round(255 * c).toString(16).padStart(2, '0');
+  };
+  return `#${f(0)}${f(8)}${f(4)}`;
+}
+
+// 원정대(owner) 이름 기준 왼쪽 색상 띠 - Tailwind는 런타임에 만든 임의 색상 클래스를 못 읽으므로 인라인 style로 반환
+export function ownerBorderStyle(owner?: string): CSSProperties {
+  if (!owner) return { borderLeft: '8px solid #334155' };
+  return { borderLeft: `8px solid ${hashColor(owner)}` };
 }

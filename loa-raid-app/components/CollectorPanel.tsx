@@ -1,61 +1,42 @@
 'use client';
 import { useState } from 'react';
 import { useRaidStore } from '../store/useRaidStore';
-import { OWNER_COLORS, sanitizeScore } from '../lib/raidConfig';
-import { fetchExpeditionApi, fetchCharacterApi } from '../lib/lopecApi';
+import { fetchExpeditionApi, fetchCharacterApi } from '../lib/lostarkApi';
+import { addCharactersToGuild, refreshOrAddCharacter } from '../lib/characterActions';
+import { useGuild } from '../lib/guildContext';
 import type { Character } from '../lib/types';
 
-const REP_NAMES = Object.keys(OWNER_COLORS);
-
-function newCharId() {
-  return `char_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-}
-
 export default function CollectorPanel() {
-  const addCharacters = useRaidStore((s) => s.addCharacters);
-  const characterPool = useRaidStore((s) => s.characterPool);
+  const { guildId, myMemberId } = useGuild();
+  const setCharacterPool = useRaidStore((s) => s.setCharacterPool);
 
-  const [selected, setSelected] = useState<Set<string>>(new Set(REP_NAMES));
-  const [loading, setLoading] = useState(false);
+  const [expeditionName, setExpeditionName] = useState('');
   const [singleName, setSingleName] = useState('');
+  const [loading, setLoading] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  function toggleOwner(name: string) {
-    setSelected((prev) => {
-      const next = new Set(prev);
-      if (next.has(name)) next.delete(name);
-      else next.add(name);
-      return next;
-    });
-  }
-
-  function toggleAll(v: boolean) {
-    setSelected(v ? new Set(REP_NAMES) : new Set());
-  }
-
-  const existingRoles = Object.fromEntries(characterPool.map((c) => [c.name, c.role]));
-
-  async function handleFetchExpeditions() {
+  async function handleFetchExpedition() {
+    if (!expeditionName.trim()) return;
     setLoading(true);
     setError(null);
     try {
-      for (const repName of selected) {
-        const rows = await fetchExpeditionApi(repName, repName).catch(() => []);
-        const chars: Character[] = rows.map((r) => ({
-          id: newCharId(),
-          name: r.name,
-          class: r.job,
-          level: r.level,
-          role: r.role,
-          synergy: r.synergy as Character['synergy'],
-          lopecScore: sanitizeScore(r.lopecScore),
-          ingameScore: sanitizeScore(r.ingameScore),
-          owner: r.owner,
-        }));
-        if (chars.length) addCharacters(chars);
+      const rows = await fetchExpeditionApi(expeditionName.trim(), expeditionName.trim());
+      const chars: Omit<Character, 'id'>[] = rows.map((r) => ({
+        name: r.name,
+        class: r.job,
+        level: r.level,
+        role: r.role,
+        synergy: r.synergy as Character['synergy'],
+        combatPower: r.combatPower,
+        owner: r.owner,
+      }));
+      if (chars.length) {
+        const fresh = await addCharactersToGuild(guildId, myMemberId, chars);
+        setCharacterPool(fresh);
       }
+      setExpeditionName('');
     } catch (e) {
-      setError(e instanceof Error ? e.message : '수집 중 오류가 발생했습니다.');
+      setError(e instanceof Error ? e.message : '원정대 조회 실패');
     } finally {
       setLoading(false);
     }
@@ -66,20 +47,17 @@ export default function CollectorPanel() {
     setLoading(true);
     setError(null);
     try {
-      const row = await fetchCharacterApi(singleName.trim(), existingRoles[singleName.trim()] ? undefined : undefined);
-      addCharacters([
-        {
-          id: newCharId(),
-          name: row.name,
-          class: row.job,
-          level: row.level,
-          role: row.role,
-          synergy: row.synergy as Character['synergy'],
-          lopecScore: sanitizeScore(row.lopecScore),
-          ingameScore: sanitizeScore(row.ingameScore),
-          owner: row.owner,
-        },
-      ]);
+      const row = await fetchCharacterApi(singleName.trim());
+      const fresh = await refreshOrAddCharacter(guildId, myMemberId, {
+        name: row.name,
+        class: row.job,
+        level: row.level,
+        role: row.role,
+        synergy: row.synergy as Character['synergy'],
+        combatPower: row.combatPower,
+        owner: row.owner,
+      });
+      setCharacterPool(fresh);
       setSingleName('');
     } catch (e) {
       setError(e instanceof Error ? e.message : '캐릭터 조회 실패');
@@ -98,39 +76,28 @@ export default function CollectorPanel() {
       </div>
 
       <div className="bg-[#0b0f19]/60 border border-slate-800/80 rounded-xl p-4 space-y-3">
-        <div className="flex justify-between items-center">
-          <span className="text-xs font-bold text-indigo-400">
-            <i className="fa-solid fa-people-group mr-1"></i> 원정대 일괄 추가
+        <span className="text-xs font-bold text-indigo-400">
+          <i className="fa-solid fa-people-group mr-1"></i> 내 원정대 전체 추가
+        </span>
+        <div className="relative">
+          <span className="absolute inset-y-0 left-0 pl-3 flex items-center text-slate-500">
+            <i className="fa-solid fa-user-tag"></i>
           </span>
-          <div className="flex gap-2 text-[10px]">
-            <button onClick={() => toggleAll(true)} className="text-indigo-400 hover:text-indigo-300 font-semibold">
-              전체선택
-            </button>
-            <span className="text-slate-700">|</span>
-            <button onClick={() => toggleAll(false)} className="text-slate-400 hover:text-slate-300 font-semibold">
-              전체해제
-            </button>
-          </div>
-        </div>
-        <div className="grid grid-cols-[repeat(auto-fill,minmax(140px,1fr))] gap-2.5 bg-[#0b0f19] border border-slate-800 rounded-lg p-3 max-h-[160px] overflow-y-auto">
-          {REP_NAMES.map((name) => (
-            <label key={name} className="flex items-center gap-2.5 p-1 hover:bg-slate-800/40 rounded cursor-pointer select-none text-xs text-slate-300">
-              <input
-                type="checkbox"
-                className="w-4 h-4 rounded border-slate-700 bg-slate-900 text-indigo-600 focus:ring-0"
-                checked={selected.has(name)}
-                onChange={() => toggleOwner(name)}
-              />
-              <span>{name}</span>
-            </label>
-          ))}
+          <input
+            value={expeditionName}
+            onChange={(e) => setExpeditionName(e.target.value)}
+            onKeyDown={(e) => e.key === 'Enter' && handleFetchExpedition()}
+            type="text"
+            placeholder="내 원정대 대표 닉네임"
+            className="w-full bg-[#0b0f19] border border-slate-700 rounded-lg pl-10 pr-3 py-2.5 text-sm text-slate-200 placeholder-slate-600 focus:outline-none focus:border-indigo-500 transition"
+          />
         </div>
         <button
-          onClick={handleFetchExpeditions}
+          onClick={handleFetchExpedition}
           disabled={loading}
           className="w-full py-2.5 bg-[#1b253b] hover:bg-[#243454] border border-indigo-500/20 text-indigo-300 font-bold rounded-lg text-xs transition flex items-center justify-center gap-2 disabled:opacity-50"
         >
-          <i className="fa-solid fa-people-pulling"></i> {loading ? '수집 중...' : '선택한 원정대 일괄 추가'}
+          <i className="fa-solid fa-people-pulling"></i> {loading ? '수집 중...' : '원정대 전체 추가'}
         </button>
       </div>
 
