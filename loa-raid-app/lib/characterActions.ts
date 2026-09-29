@@ -74,6 +74,21 @@ async function findOrCreateExpedition(
   return created.id;
 }
 
+// 로스트아크 주간 골드는 원정대(계정)당 최대 6캐릭터까지만 받을 수 있어서, 새로 등록되는 캐릭터는
+// 그 원정대의 레벨 상위 6명 안에 들면 골드 획득 기본값을 ON으로 초기화합니다(이미 있는 캐릭터는 값을 건드리지 않음).
+function decideAutoGoldGetters(existingLevels: number[], newChars: { name: string; level: number }[]): Map<string, boolean> {
+  const combined = [
+    ...existingLevels.map((level) => ({ isNew: false as const, name: '', level })),
+    ...newChars.map((c) => ({ isNew: true as const, name: c.name, level: c.level })),
+  ].sort((a, b) => b.level - a.level);
+
+  const result = new Map<string, boolean>();
+  combined.forEach((entry, idx) => {
+    if (entry.isNew) result.set(entry.name, idx < 6);
+  });
+  return result;
+}
+
 // 이미 같은 이름의 캐릭터가 있으면 레벨/전투력 등을 최신으로 갱신하고, 없는 캐릭터만 새로 추가합니다.
 export async function addCharactersToGuild(
   guildId: string,
@@ -82,7 +97,7 @@ export async function addCharactersToGuild(
 ): Promise<Character[]> {
   const { data: existing, error: existingError } = await supabase
     .from('characters')
-    .select('id, name, role, synergy')
+    .select('id, name, role, synergy, owner_name, level')
     .eq('guild_id', guildId);
   if (existingError) throw existingError;
 
@@ -92,6 +107,20 @@ export async function addCharactersToGuild(
 
   if (newOnes.length) {
     const expeditionId = await findOrCreateExpedition(guildId, memberId, newOnes[0].owner);
+
+    // 원정대(owner)별로 묶어서 골드 획득 기본값 결정
+    const newOnesByOwner = new Map<string, typeof newOnes>();
+    newOnes.forEach((c) => {
+      const arr = newOnesByOwner.get(c.owner) ?? [];
+      arr.push(c);
+      newOnesByOwner.set(c.owner, arr);
+    });
+    const goldGetterByName = new Map<string, boolean>();
+    newOnesByOwner.forEach((group, owner) => {
+      const existingLevels = (existing ?? []).filter((r) => r.owner_name === owner).map((r) => r.level);
+      decideAutoGoldGetters(existingLevels, group).forEach((v, name) => goldGetterByName.set(name, v));
+    });
+
     const rows = newOnes.map((c) => ({
       guild_id: guildId,
       added_by_member_id: memberId,
@@ -103,6 +132,7 @@ export async function addCharactersToGuild(
       role: c.role,
       synergy: c.synergy,
       combat_power: c.combatPower ?? null,
+      is_gold_getter: goldGetterByName.get(c.name) ?? false,
     }));
     const { error } = await supabase.from('characters').insert(rows);
     if (error) throw error;
@@ -156,6 +186,17 @@ export async function refreshOrAddCharacter(
     // RLS 상 권한 없으면 0건 갱신되고 에러는 안 남 - 조용히 무시
   } else {
     const expeditionId = await findOrCreateExpedition(guildId, memberId, char.owner);
+    const { data: ownerChars, error: ownerCharsError } = await supabase
+      .from('characters')
+      .select('level')
+      .eq('guild_id', guildId)
+      .eq('owner_name', char.owner);
+    if (ownerCharsError) throw ownerCharsError;
+    const isGoldGetter = decideAutoGoldGetters(
+      (ownerChars ?? []).map((r) => r.level),
+      [{ name: char.name, level: char.level }]
+    ).get(char.name);
+
     const { error } = await supabase.from('characters').insert({
       guild_id: guildId,
       added_by_member_id: memberId,
@@ -167,6 +208,7 @@ export async function refreshOrAddCharacter(
       role: char.role,
       synergy: char.synergy,
       combat_power: char.combatPower ?? null,
+      is_gold_getter: isGoldGetter ?? false,
     });
     if (error) throw error;
   }

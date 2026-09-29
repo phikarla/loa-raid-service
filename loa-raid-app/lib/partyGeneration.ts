@@ -1,6 +1,7 @@
 // 사과_V4 legacy-index.html 의 runAutoMatchAll() 이식
-import type { Character, RaidFormations, PartyMember } from './types';
-import { RAID_ORDER, RAID_FAMILY, RAID_MIN_LEVEL } from './raidConfig';
+// (2026-09 재작성: 기존 포팅이 원본의 "점수 기반 최적 배치" 알고리즘을 놓치고 있어서 처음부터 다시 이식함)
+import type { Character, RaidFormations, RaidFormation, Party, Team, PartyMember } from './types';
+import { RAID_ORDER, RAID_FAMILY, RAID_MIN_LEVEL, RAID_MAX_LEVEL } from './raidConfig';
 
 function toMember(c: Character): PartyMember {
   return {
@@ -21,149 +22,268 @@ function newId(prefix: string) {
   return `${prefix}_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
 }
 
+interface TeamSlotOption {
+  team: Team;
+  side: 'p1' | 'p2';
+}
+
 /**
- * 대기풀 캐릭터를 각 레이드의 "체크되지 않은(잠기지 않은)" 파티/팀 빈 슬롯에 자동으로 채워 넣습니다.
- * - 체크된(잠긴) 파티/팀과 그 인원은 그대로 유지합니다.
- * - 같은 레이드 그룹(RAID_FAMILY, 예: 지평의 성당 1~3단계)끼리만 중복 배치를 막습니다. 다른 레이드는 겹쳐도 됩니다.
- * - 레이드별 최소 템렙(RAID_MIN_LEVEL) 미만인 캐릭터는 후보에서 제외합니다.
- * - 같은 파티/팀 안에 같은 원정대(owner) 캐릭터가 2명 이상 들어가지 않도록 합니다.
- * - 4인 파티: 서폿 1 우선 배치 + 나머지 딜러는 시너지가 겹치지 않도록 우선 배치합니다.
- * - 8인 레이드(벨가르딘): 4인 파티 2개(p1/p2)를 동일한 규칙으로 채웁니다.
- * - 파티/팀이 하나도 없는 레이드는 후보 인원 수에 맞춰 자동으로 만듭니다.
+ * 대기풀 캐릭터를 각 레이드의 파티/팀에 자동으로 채워 넣습니다 (legacy runAutoMatchAll 원본 알고리즘 그대로 이식).
+ * - 체크된(잠긴) 파티/팀과 그 인원, 그리고 예비 대기열 인원은 해당 레이드 그룹(RAID_FAMILY) 안에서 "이미 사용됨"으로 보고 건드리지 않습니다.
+ * - 레벨 컷을 통과 못 하거나, 골드 획득 토글이 꺼진 캐릭터는 배정 대상에서 빠지고 예비 대기열로 강제 이동합니다.
+ * - 배정 대상 인원은 "같은 레이드에 배정 가능한 캐릭터 수가 많은 원정대 우선, 그다음 전투력 내림차순"으로 정렬됩니다.
+ * - 서포터를 먼저 배치하고, 남은 딜러(+배치 못한 서포터)를 이어서 배치합니다.
+ * - 각 캐릭터는 활성 파티/팀들 중 "원정대 중복이면 즉시 탈락, 직업 중복이면 감점, 인원이 적을수록 우선"으로 점수를 매겨 가장 적합한 곳에 들어갑니다.
+ * - 8인 레이드는 같은 팀의 p1/p2 두 파티를 합쳐서 원정대/직업 중복을 검사합니다.
+ * - 기존에 체크(완료)되지 않은 파티/팀은 매번 새로 계산해서 다시 만듭니다 (체크된 것만 보존됩니다).
  */
 export function runAutoMatchAll(characterPool: Character[], current: RaidFormations): RaidFormations {
-  // 레이드 그룹(family)별로 사용된 인원을 따로 추적 - 그룹 내에서만 중복 배치 금지
-  const usedIdsByFamily = new Map<string, Set<string>>();
-  function familyUsed(raidName: string): Set<string> {
-    const family = RAID_FAMILY[raidName] ?? raidName;
-    if (!usedIdsByFamily.has(family)) usedIdsByFamily.set(family, new Set());
-    return usedIdsByFamily.get(family)!;
+  const next: RaidFormations = JSON.parse(JSON.stringify(current));
+
+  // 1. 레이드 그룹(family)별로 "이미 잠긴(체크) 파티/팀 인원 + 예비 대기열 인원"을 사용됨으로 표시
+  const lockedByFamily = new Map<string, Set<string>>();
+  const matchedByFamily = new Map<string, Set<string>>();
+  function familySet(map: Map<string, Set<string>>, family: string): Set<string> {
+    if (!map.has(family)) map.set(family, new Set());
+    return map.get(family)!;
   }
 
-  // 1. 이미 잠긴(체크된) 파티/팀 + 예비 대기열에 있는 인원은 해당 그룹에서 사용됨으로 표시
-  // (예비 대기열은 "이번 주 쉬는 인원"으로 수동/강제 지정된 것이므로, 재자동배치 때 다시 끌려나오면 안 됨)
   RAID_ORDER.forEach((raidName) => {
-    const rf = current[raidName];
+    const rf = next[raidName];
     if (!rf) return;
-    const used = familyUsed(raidName);
-    if (rf.type === '4인') {
-      rf.parties.forEach((p) => {
-        if (p.checked) p.members.forEach((m) => used.add(m.id));
-      });
-    } else {
+    const family = RAID_FAMILY[raidName] ?? raidName;
+    const locked = familySet(lockedByFamily, family);
+    const matched = familySet(matchedByFamily, family);
+    if (rf.type === '8인') {
       rf.teams.forEach((t) => {
         if (t.checked) {
-          t.p1.members.forEach((m) => used.add(m.id));
-          t.p2.members.forEach((m) => used.add(m.id));
+          t.p1.members.forEach((m) => {
+            locked.add(m.id);
+            matched.add(m.id);
+          });
+          t.p2.members.forEach((m) => {
+            locked.add(m.id);
+            matched.add(m.id);
+          });
+        }
+      });
+    } else {
+      rf.parties.forEach((p) => {
+        if (p.checked) {
+          p.members.forEach((m) => {
+            locked.add(m.id);
+            matched.add(m.id);
+          });
         }
       });
     }
-    rf.standby.forEach((m) => used.add(m.id));
+    rf.standby.forEach((m) => {
+      locked.add(m.id);
+      matched.add(m.id);
+    });
   });
-
-  const next: RaidFormations = JSON.parse(JSON.stringify(current));
 
   RAID_ORDER.forEach((raidName) => {
     const rf = next[raidName];
     if (!rf) return;
 
-    const used = familyUsed(raidName);
-    const minLevel = RAID_MIN_LEVEL[raidName] ?? 0;
+    const is8Player = rf.type === '8인';
 
-    // 이 레이드 컷을 통과하는 인원 중, 골드 수급 토글이 꺼진 캐릭터는 자동 배치 대상에서 빼고
-    // 예비 대기열로 강제 이동시킴 (이번 주에 이 캐릭터로는 골드를 안 챙기겠다는 의미이므로)
-    const eligible = characterPool.filter((c) => !used.has(c.id) && c.level >= minLevel);
-    const forcedStandby = eligible.filter((c) => c.isGoldGetter !== true);
-
-    // 이 레이드에서 사용 가능한 인원 풀(최소 템렙 이상 + 아직 안 쓰인 인원 + 골드 토글 켜짐)을 서폿 우선, 전투력 내림차순 정렬
-    const pool = eligible
-      .filter((c) => c.isGoldGetter === true)
-      .sort((a, b) => {
-        if (a.role === '서폿' && b.role !== '서폿') return -1;
-        if (a.role !== '서폿' && b.role === '서폿') return 1;
-        return (b.combatPower || 0) - (a.combatPower || 0);
-      });
-
-    function takeFourFor(usedSynergies: Set<string>, usedOwners: Set<string>): PartyMember[] {
-      const picked: Character[] = [];
-      // 서폿 1명 우선 (원정대 중복 제외)
-      const supIdx = pool.findIndex((c) => c.role === '서폿' && !used.has(c.id) && !usedOwners.has(c.owner));
-      if (supIdx > -1) {
-        picked.push(pool[supIdx]);
-        used.add(pool[supIdx].id);
-        usedOwners.add(pool[supIdx].owner);
-      }
-      // 시너지 & 원정대 겹치지 않는 딜러 우선, 부족하면 원정대 중복만 피해서 채움
-      while (picked.length < 4) {
-        let idx = pool.findIndex(
-          (c) => !used.has(c.id) && c.role !== '서폿' && !usedSynergies.has(c.synergy) && !usedOwners.has(c.owner)
-        );
-        if (idx === -1) {
-          idx = pool.findIndex((c) => !used.has(c.id) && !usedOwners.has(c.owner));
-        }
-        if (idx === -1) break;
-        picked.push(pool[idx]);
-        used.add(pool[idx].id);
-        usedSynergies.add(pool[idx].synergy);
-        usedOwners.add(pool[idx].owner);
-      }
-      return picked.map(toMember);
+    // 이 레이드가 전부 잠겨있으면(모든 파티/팀이 체크됨) 건드리지 않음
+    if (is8Player) {
+      if (rf.teams.length > 0 && rf.teams.every((t) => t.checked)) return;
+    } else {
+      if (rf.parties.length > 0 && rf.parties.every((p) => p.checked)) return;
     }
 
-    // 빈 파티/팀이 하나도 없으면, 후보 인원 수에 맞춰 자동 생성
-    if (rf.type === '4인' && rf.parties.length === 0 && pool.length > 0) {
-      const partyCount = Math.ceil(pool.length / 4);
-      for (let i = 0; i < partyCount; i++) {
-        rf.parties.push({ id: newId('party'), name: `${i + 1}파티`, members: [], checked: false });
-      }
+    const family = RAID_FAMILY[raidName] ?? raidName;
+    const locked = familySet(lockedByFamily, family);
+    const matched = familySet(matchedByFamily, family);
+    const minLvl = RAID_MIN_LEVEL[raidName] ?? 0;
+    const maxLvl = RAID_MAX_LEVEL[raidName] ?? Infinity;
+
+    // 이 레이드 컷을 통과하는 유효 캐릭터 필터링
+    let qualified = characterPool.filter((c) => {
+      if (locked.has(c.id) || matched.has(c.id)) return false;
+      return c.level >= minLvl && c.level < maxLvl;
+    });
+
+    // 골드 토글이 꺼진 캐릭터는 배정 대상에서 빼고 이 레이드의 예비 대기열로 강제 이동
+    const forcedStandby: Character[] = [];
+    const autoAssignable: Character[] = [];
+    qualified.forEach((c) => {
+      if (c.isGoldGetter !== true) forcedStandby.push(c);
+      else autoAssignable.push(c);
+    });
+    qualified = autoAssignable;
+
+    if (qualified.length === 0 && forcedStandby.length === 0) return;
+
+    // 같은 레이드에 배정 가능한 캐릭터 수가 많은 원정대 우선, 그다음 전투력 내림차순
+    const ownerCounts = new Map<string, number>();
+    qualified.forEach((c) => ownerCounts.set(c.owner, (ownerCounts.get(c.owner) ?? 0) + 1));
+    const byOwnerCountThenScore = (a: Character, b: Character): number => {
+      const diff = (ownerCounts.get(b.owner) ?? 0) - (ownerCounts.get(a.owner) ?? 0);
+      if (diff !== 0) return diff;
+      return (b.combatPower || 0) - (a.combatPower || 0);
+    };
+
+    const supporters = qualified.filter((c) => c.role === '서폿').sort(byOwnerCountThenScore);
+    const dealers = qualified.filter((c) => c.role !== '서폿').sort(byOwnerCountThenScore);
+
+    // 파티/팀 개수 산정
+    let partyCount = 0;
+    let teamCount = 0;
+    if (is8Player) {
+      const neededByDealers = Math.ceil(dealers.length / 6); // 8인은 한 팀에 딜러 6명
+      const availableSups = Math.floor(supporters.length / 2); // 한 팀에 서폿 2명
+      teamCount = Math.max(neededByDealers, availableSups, 1);
+    } else {
+      const neededByDealers = Math.ceil(dealers.length / 3);
+      partyCount = Math.max(supporters.length, neededByDealers, 1);
     }
-    if (rf.type === '8인' && rf.teams.length === 0 && pool.length > 0) {
-      const teamCount = Math.ceil(pool.length / 8);
+
+    // 체크(완료)된 것만 보존하고 나머지 파티/팀은 새로 만듦
+    const preservedTeams = is8Player ? rf.teams.filter((t) => t.checked) : [];
+    const preservedParties = !is8Player ? rf.parties.filter((p) => p.checked) : [];
+
+    const teams: Team[] = [...preservedTeams];
+    const parties: Party[] = [...preservedParties];
+
+    if (is8Player) {
       for (let i = 0; i < teamCount; i++) {
-        rf.teams.push({
+        teams.push({
           id: newId('team'),
-          name: `${i + 1}공격대`,
+          name: `${teams.length + 1}공격대`,
+          checked: false,
           p1: { id: newId('p'), members: [] },
           p2: { id: newId('p'), members: [] },
-          checked: false,
         });
+      }
+    } else {
+      for (let i = 0; i < partyCount; i++) {
+        parties.push({ id: newId('party'), name: `${parties.length + 1}파티`, members: [], checked: false });
       }
     }
 
-    if (rf.type === '4인') {
-      rf.parties.forEach((party) => {
-        if (party.checked) return;
-        const usedSynergies = new Set(party.members.map((m) => m.synergy));
-        const usedOwners = new Set(party.members.map((m) => m.owner));
-        const need = 4 - party.members.length;
-        if (need > 0) {
-          const filled = takeFourFor(usedSynergies, usedOwners).slice(0, need);
-          party.members = [...party.members, ...filled];
-        }
-      });
-    } else {
-      rf.teams.forEach((team) => {
-        if (team.checked) return;
-        [team.p1, team.p2].forEach((half) => {
-          const usedSynergies = new Set(half.members.map((m) => m.synergy));
-          const usedOwners = new Set(half.members.map((m) => m.owner));
-          const need = 4 - half.members.length;
-          if (need > 0) {
-            const filled = takeFourFor(usedSynergies, usedOwners).slice(0, need);
-            half.members = [...half.members, ...filled];
+    const activeTeams = teams.filter((t) => !t.checked);
+    const activeParties = parties.filter((p) => !p.checked);
+
+    // 원정대 중복이면 즉시 탈락(-999999), 직업 중복이면 감점(-400), 인원 적은 쪽 우선(-members*10)
+    function assignCharacter(char: Character, isSupport: boolean): boolean {
+      if (is8Player) {
+        const options: TeamSlotOption[] = [];
+        activeTeams.forEach((t) => {
+          if (isSupport) {
+            if (t.p1.members.filter((m) => m.role === '서폿').length === 0) options.push({ team: t, side: 'p1' });
+            if (t.p2.members.filter((m) => m.role === '서폿').length === 0) options.push({ team: t, side: 'p2' });
+          } else {
+            if (t.p1.members.filter((m) => m.role !== '서폿').length < 3) options.push({ team: t, side: 'p1' });
+            if (t.p2.members.filter((m) => m.role !== '서폿').length < 3) options.push({ team: t, side: 'p2' });
           }
         });
-      });
+        if (options.length === 0) return false;
+
+        const scored = options.map((opt) => {
+          const partyObj = opt.side === 'p1' ? opt.team.p1 : opt.team.p2;
+          const peer = opt.side === 'p1' ? opt.team.p2 : opt.team.p1;
+          const combined = [...partyObj.members, ...peer.members];
+          let score = 1000;
+          if (combined.some((m) => m.owner === char.owner)) score -= 999999;
+          if (combined.filter((m) => m.class === char.class).length >= 2) score -= 400;
+          score -= partyObj.members.length * 10;
+          return { opt, score };
+        });
+        scored.sort((a, b) => b.score - a.score);
+        if (scored[0].score > -500000) {
+          const best = scored[0].opt;
+          const partyObj = best.side === 'p1' ? best.team.p1 : best.team.p2;
+          partyObj.members.push(toMember(char));
+          return true;
+        }
+        return false;
+      } else {
+        const available = activeParties.filter((p) =>
+          isSupport ? p.members.filter((m) => m.role === '서폿').length === 0 : p.members.filter((m) => m.role !== '서폿').length < 3
+        );
+        if (available.length === 0) return false;
+
+        const scored = available.map((p) => {
+          let score = 1000;
+          if (p.members.some((m) => m.owner === char.owner)) score -= 999999;
+          if (p.members.some((m) => m.class === char.class)) score -= 400;
+          score -= p.members.length * 10;
+          return { p, score };
+        });
+        scored.sort((a, b) => b.score - a.score);
+        if (scored[0].score > -500000) {
+          scored[0].p.members.push(toMember(char));
+          return true;
+        }
+        return false;
+      }
     }
 
-    // 골드 토글이 꺼져서 이번 배치에서 제외된 인원을 예비 대기열에 합침 (이미 있으면 중복 추가 안 함)
-    const existingStandbyIds = new Set(rf.standby.map((m) => m.id));
-    forcedStandby.forEach((c) => {
-      if (!existingStandbyIds.has(c.id)) {
-        rf.standby.push(toMember(c));
-        existingStandbyIds.add(c.id);
-      }
+    // 서포터 먼저 중복 배정 제어
+    const unallocatedSups: Character[] = [];
+    supporters.forEach((sup) => {
+      if (assignCharacter(sup, true)) matched.add(sup.id);
+      else unallocatedSups.push(sup);
     });
+
+    // 남은 딜러 + 배치 못한 서포터를 이어서 배치 (본래 역할대로 서폿 슬롯/딜러 슬롯 판별)
+    const combinedDealers = [...dealers, ...unallocatedSups].sort(byOwnerCountThenScore);
+    combinedDealers.forEach((char) => {
+      const isSupportChar = char.role === '서폿';
+      const assigned = assignCharacter(char, isSupportChar);
+      if (!assigned) {
+        // 들어갈 빈자리가 없으면 새 팀/파티를 열어서 배정
+        if (is8Player) {
+          const newTeam: Team = {
+            id: newId('team'),
+            name: `${teams.length + 1}공격대`,
+            checked: false,
+            p1: { id: newId('p'), members: [toMember(char)] },
+            p2: { id: newId('p'), members: [] },
+          };
+          teams.push(newTeam);
+          activeTeams.push(newTeam);
+        } else {
+          const newP: Party = { id: newId('party'), name: `${parties.length + 1}파티`, members: [toMember(char)], checked: false };
+          parties.push(newP);
+          activeParties.push(newP);
+        }
+      }
+      matched.add(char.id);
+    });
+
+    if (is8Player) {
+      // 중간에 빈 팀이 생겨도 세트는 보존하고, 꼬리에 남은 완전히 빈 팀만 정리
+      while (teams.length > 0) {
+        const last = teams[teams.length - 1];
+        if (!last.checked && last.p1.members.length === 0 && last.p2.members.length === 0) teams.pop();
+        else break;
+      }
+      next[raidName] = {
+        type: '8인',
+        teams,
+        standby: [...rf.standby, ...forcedStandby.map(toMember)],
+      };
+    } else {
+      // 빈 미체크 파티는 제거하고, 미체크 파티만 순번대로 이름 재부여
+      const filtered = parties.filter((p) => p.members.length > 0 || p.checked);
+      let idx = 0;
+      const renamed = filtered.map((p) => {
+        if (p.checked) return p;
+        idx++;
+        return { ...p, name: `${idx}파티` };
+      });
+      next[raidName] = {
+        type: '4인',
+        parties: renamed,
+        standby: [...rf.standby, ...forcedStandby.map(toMember)],
+      };
+    }
   });
 
   return next;
